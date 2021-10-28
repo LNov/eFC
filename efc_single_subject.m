@@ -1,28 +1,20 @@
-function efc_single_subject(i_subj)
-% Compute edge-centric features from empirical data (Human Connectome
-% Project) and corresponding null model. Compare results in terms of nFC
+function res = efc_single_subject(ts)
+% Compute edge-centric features and compare with null model in terms of nFC
 % similarity from top vs bottom RSS frames, as well as similarity between
-% empirical and predicted eFC matrices. Run k-means clustering on eFC.
+% empirical and predicted eFC matrices.
+% input: 2D time series array (n_parcels x n_frames)
 
-N           = 200;      % number of parcels
-T           = 1200;     % time steps
-T_null      = T * 50;	% time steps for null model simulation
-
-% Load HCP ICA-FIX time series for single subject (i_subj)
-% using 'Schaefer2018_200Parcels_17Networks' parcellation
-ts = data(1:N,1:T,i_subj); % data is a (200 x 1200 x 100) array
-
-% Apply GSR
-ts = ts - mean(ts,1);
-
-% z-score
-ts = zscore(ts,0,2); % nCov and nFC will coincide in this case
+N          	= size(ts,1); % number of parcels (regions)
+T          	= size(ts,2); % number of frames
+T_null      = T * 50;     % number of frames for null model
 
 % Match (Faskowitz 2020) ROI order for Schaefer2018_200Parcels_17Networks
-load('ROI_order.mat','idx_sort');
-ts(51:56,:)     = ts(56:-1:51,:);   % move Limbic_B after Limbic_A
-ts(157:164,:)   = ts(164:-1:157,:); % move Limbic_B after Limbic_A
-ts              = ts(idx_sort,:);   % sort to match Faskowitz 2020
+if N == 200
+    load('ROI_order.mat','idx_sort');
+    ts(51:56,:)     = ts(56:-1:51,:);   % move Limbic_B after Limbic_A
+    ts(157:164,:)   = ts(164:-1:157,:); % move Limbic_B after Limbic_A
+    ts              = ts(idx_sort,:);   % sort to match Faskowitz 2020
+end
 
 % Node covariance matrix and node FC
 nCov                = (ts * ts') / (T - 1);
@@ -131,66 +123,55 @@ res.FC_mod_top_est  = mod_top_est;
 res.FC_mod_bot_est  = mod_bot_est;
 
 %----------------------------------------------------------------------
-% edge FC
-eCov_diag           = NaN(N^2,1);
-eCov_est_diag       = NaN(N^2,1);
-[ix,iy]             = find(ones(N));
-for ir = 1:N^2
+% eFC (empirical)
+eFC                 = eye((N*(N-1))/2);
+eCov_diag           = NaN((N*(N-1))/2,1);
+for ir = 1:(N*(N-1))/2
+    eCov_diag(ir)   = ...
+        edge_ts(ir,:) * edge_ts(ir,:)' / (T - 1);
+end
+% take sqrt once here instead of repeatedly later
+eCov_diag           = sqrt(eCov_diag);
+for ir = 1:(N*(N-1))/2
+    for ic = ir+1:(N*(N-1))/2 % only upper triangular
+        eCov        = ...
+            edge_ts(ir,:) * edge_ts(ic,:)' / (T - 1);
+        eFC(ir,ic)  = eCov / (eCov_diag(ir) * eCov_diag(ic));
+        eFC(ic,ir)  = eFC(ir,ic); % symmetric
+    end
+end
+% eFC (null)
+[ix,iy]             = find(triu(ones(N),1));
+eFC_est             = eye(length(ix));
+eCov_est_diag       = NaN(length(ix),1);
+for ir = 1:length(ix)
     jj  = ix(ir);
     k   = iy(ir);
     eCov_est_diag(ir) = ...
         nCov(jj,jj) * nCov(k,k)...
         + nCov(jj,k) * nCov(k,jj) ...
         + nCov(jj,k) * nCov(jj,k);
-    eCov_diag(ir)     = ...
-        edge_ts_all(ir,:) * edge_ts_all(ir,:)' / (T - 1);
 end
-eCov_diag           = sqrt(eCov_diag);
+% take sqrt once here instead of repeatedly later
 eCov_est_diag       = sqrt(eCov_est_diag);
-% quantities required for online Pearson correlation computation
-% https://stats.stackexchange.com/questions/410468/online-update-of-pearson-coefficient
-x_mean              = 0;
-y_mean              = 0;
-num                 = 0;
-den1                = 0;
-den2                = 0;
-n                   = 1;
-for ir = 1:N^2
+for ir = 1:length(ix)
     jj  = ix(ir);
     k   = iy(ir);
-    for ic = ir+1:N^2 % only upper triangular
+    for ic = ir+1:length(ix)
         l  = ix(ic);
         m  = iy(ic);
         eCov_est    = ...
             nCov(jj,l) * nCov(k,m)...
             + nCov(jj,m) * nCov(k,l) ...
             + nCov(jj,k) * nCov(l,m);
-        eFC_est     = ...
+        eFC_est(ir,ic)     = ...
             eCov_est / (eCov_est_diag(ir) * eCov_est_diag(ic));
-        eCov        = ...
-            edge_ts_all(ir,:) * edge_ts_all(ic,:)' / (T - 1);
-        eFC         = eCov / (eCov_diag(ir) * eCov_diag(ic));
-        % update quantities for online Pearson corr computation
-        x_mean_old  = x_mean;
-        y_mean_old  = y_mean;
-        x_mean      = x_mean + (eFC - x_mean) / n;
-        y_mean      = y_mean + (eFC_est - y_mean) / n;
-        num         = num + (eFC - x_mean_old) * (eFC_est - y_mean);
-        den1        = den1 + (eFC - x_mean_old) * (eFC - x_mean);
-        den2        = den2 + (eFC_est - y_mean_old) * (eFC_est - y_mean);
-        n           = n + 1;
+        eFC_est(ic,ir)  = eFC_est(ir,ic); % symmetric
     end
 end
-res.eFC_sim         = num / sqrt(den1 * den2);
-
-% k-means
-clusters_n = 10;
-replications = 3;
-[res.kmeans_idx,res.cent,res.sumdist] = kmeans(...
-    eFC,clusters_n, ...
-    'Replicates',replications,'Display','final');  
-[res.kmeans_idx_est,res.cent_est,res.sumdist_est] = kmeans(...
-    eFC_est,clusters_n, ...
-    'Replicates',replications,'Display','final'); 
+% correlation between empirical and null eFC
+upper_tri           = logical(triu(ones((N*(N-1))/2),1));
+r                   = corrcoef(eFC(upper_tri),eFC_est(upper_tri));
+res.eFC_sim         = r(1,2);
 
 end
